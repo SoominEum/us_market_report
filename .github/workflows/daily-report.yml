@@ -22,4 +22,5 @@ jobs:
           OPENAI_MODEL: gpt-4.1-mini
           REPORT_TIMEZONE: Asia/Seoul
           NEWS_LOOKBACK_HOURS: "36"
+          SURGE_THRESHOLD_PERCENT: "3.0"
         run: python market_report.py --send

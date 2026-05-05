@@ -42,6 +42,38 @@ MARKET_SYMBOLS = {
 }
 
 
+SEMI_SYMBOLS = {
+    "NVDA": "Nvidia",
+    "AMD": "AMD",
+    "AVGO": "Broadcom",
+}
+
+
+SEMI_ETFS = {
+    "SMH": "VanEck Semiconductor ETF",
+    "SOXX": "iShares Semiconductor ETF",
+}
+
+
+MOMENTUM_WATCHLIST = {
+    "NVDA": ("Nvidia", "반도체/AI 가속기"),
+    "AMD": ("AMD", "반도체/AI 가속기"),
+    "AVGO": ("Broadcom", "반도체/네트워크칩"),
+    "MU": ("Micron", "메모리 반도체"),
+    "ARM": ("Arm", "반도체 설계/IP"),
+    "TSM": ("TSMC ADR", "파운드리"),
+    "ASML": ("ASML ADR", "반도체 장비"),
+    "QCOM": ("Qualcomm", "모바일 반도체"),
+    "INTC": ("Intel", "종합 반도체"),
+    "MRVL": ("Marvell", "데이터센터 반도체"),
+    "AAPL": ("Apple", "대형 기술주/소비재"),
+    "MSFT": ("Microsoft", "소프트웨어/클라우드"),
+    "AMZN": ("Amazon", "이커머스/클라우드"),
+    "META": ("Meta", "인터넷/AI"),
+    "TSLA": ("Tesla", "전기차"),
+}
+
+
 NEWS_FEEDS = [
     {
         "name": "Yahoo Finance",
@@ -105,6 +137,7 @@ class MarketMove:
     symbol: str
     price: float | None
     change_percent: float | None
+    sector: str | None = None
 
 
 @dataclass(frozen=True)
@@ -225,10 +258,14 @@ def openai_headers() -> dict[str, str]:
     }
 
 
-def ask_openai_for_summary(markets: list[MarketMove], news: list[NewsItem]) -> list[str]:
+def ask_openai_for_summary(markets: list[MarketMove], news: list[NewsItem], semis: list[MarketMove], etfs: list[MarketMove]) -> list[str]:
     market_text = "\n".join(
         f"{move.name}: {format_price(move.price)} ({direction_label(move.change_percent)})"
         for move in markets
+    )
+    semi_text = "\n".join(
+        f"{move.name}: {format_price(move.price)} ({direction_label(move.change_percent)})"
+        for move in [*semis, *etfs]
     )
     news_text = "\n".join(
         f"{index}. {item.title} ({item.source}) - {item.summary[:220]}"
@@ -247,6 +284,9 @@ def ask_openai_for_summary(markets: list[MarketMove], news: list[NewsItem]) -> l
 
 [시장 데이터]
 {market_text}
+
+[반도체/ETF 데이터]
+{semi_text}
 
 [뉴스]
 {news_text}
@@ -281,7 +321,7 @@ def ask_openai_for_summary(markets: list[MarketMove], news: list[NewsItem]) -> l
     return bullets[:4]
 
 
-def fetch_market_move(symbol: str, name: str) -> MarketMove:
+def fetch_market_move(symbol: str, name: str, sector: str | None = None) -> MarketMove:
     encoded = urllib.parse.quote(symbol, safe="")
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?range=5d&interval=1d"
     try:
@@ -298,14 +338,22 @@ def fetch_market_move(symbol: str, name: str) -> MarketMove:
         change_percent = None
         if price is not None and previous_close:
             change_percent = ((float(price) - float(previous_close)) / float(previous_close)) * 100
-        return MarketMove(name=name, symbol=symbol, price=float(price) if price is not None else None, change_percent=change_percent)
+        return MarketMove(name=name, symbol=symbol, price=float(price) if price is not None else None, change_percent=change_percent, sector=sector)
     except Exception as exc:
         print(f"warning: failed to fetch market data for {symbol}: {exc}", file=sys.stderr)
-        return MarketMove(name=name, symbol=symbol, price=None, change_percent=None)
+        return MarketMove(name=name, symbol=symbol, price=None, change_percent=None, sector=sector)
 
 
 def fetch_markets() -> list[MarketMove]:
     return [fetch_market_move(symbol, name) for symbol, name in MARKET_SYMBOLS.items()]
+
+
+def fetch_named_moves(symbols: dict[str, str]) -> list[MarketMove]:
+    return [fetch_market_move(symbol, name) for symbol, name in symbols.items()]
+
+
+def fetch_watchlist_moves() -> list[MarketMove]:
+    return [fetch_market_move(symbol, name, sector) for symbol, (name, sector) in MOMENTUM_WATCHLIST.items()]
 
 
 def direction_label(change_percent: float | None) -> str:
@@ -338,6 +386,77 @@ def market_tone(moves: Iterable[MarketMove]) -> str:
     return f"지수별 방향이 엇갈린 혼조세였습니다. 주요 3대 지수 평균 등락률은 {avg:+.2f}%입니다."
 
 
+def format_move_lines(moves: Iterable[MarketMove]) -> list[str]:
+    return [
+        f"- {move.name} ({move.symbol}): {format_price(move.price)} ({direction_label(move.change_percent)})"
+        for move in moves
+    ]
+
+
+def surge_lines(moves: list[MarketMove]) -> list[str]:
+    threshold = float(os.getenv("SURGE_THRESHOLD_PERCENT", "3.0"))
+    surged = [
+        move for move in moves
+        if move.change_percent is not None and move.change_percent >= threshold
+    ]
+    surged.sort(key=lambda move: move.change_percent or 0, reverse=True)
+    if not surged:
+        return [f"- 관심 종목군에서 +{threshold:.1f}% 이상 급등한 종목은 확인되지 않았습니다."]
+    return [
+        f"- {move.name} ({move.symbol}): {direction_label(move.change_percent)} / 관련 섹터: {move.sector or '분류 없음'}"
+        for move in surged[:5]
+    ]
+
+
+def korea_impact(markets: list[MarketMove], semis: list[MarketMove], etfs: list[MarketMove], watchlist: list[MarketMove]) -> list[str]:
+    by_symbol = {move.symbol: move for move in [*markets, *semis, *etfs, *watchlist]}
+    nasdaq = by_symbol.get("^IXIC")
+    sp500 = by_symbol.get("^GSPC")
+    vix = by_symbol.get("^VIX")
+    dollar = by_symbol.get("DX-Y.NYB")
+    wti = by_symbol.get("CL=F")
+    semi_values = [
+        move.change_percent for move in [*semis, *etfs]
+        if move.change_percent is not None
+    ]
+    semi_avg = sum(semi_values) / len(semi_values) if semi_values else None
+
+    lines = []
+    if nasdaq and nasdaq.change_percent is not None:
+        if nasdaq.change_percent >= 0.4:
+            lines.append("- Nasdaq 강세는 다음날 한국 성장주와 KOSDAQ 투자심리에 우호적인 재료입니다.")
+        elif nasdaq.change_percent <= -0.4:
+            lines.append("- Nasdaq 약세는 다음날 한국 성장주와 KOSDAQ에 부담으로 작용할 수 있습니다.")
+        else:
+            lines.append("- Nasdaq 변동폭이 제한적이라 한국 성장주 영향은 업종별 재료에 따라 갈릴 가능성이 큽니다.")
+
+    if semi_avg is not None:
+        if semi_avg >= 0.5:
+            lines.append(f"- 미국 반도체 주요주/ETF 평균이 {semi_avg:+.2f}%로 강해 삼성전자, SK하이닉스 등 반도체 대형주 심리에 긍정적입니다.")
+        elif semi_avg <= -0.5:
+            lines.append(f"- 미국 반도체 주요주/ETF 평균이 {semi_avg:+.2f}%로 약해 국내 반도체 밸류체인에는 부담 요인입니다.")
+        else:
+            lines.append(f"- 미국 반도체 주요주/ETF 평균은 {semi_avg:+.2f}%로 중립권이라 국내 반도체주는 개별 뉴스 영향이 더 커질 수 있습니다.")
+
+    if dollar and dollar.change_percent is not None and dollar.change_percent >= 0.3:
+        lines.append("- 달러 강세는 원화 약세 압력으로 이어질 수 있어 외국인 수급에는 다소 부담입니다.")
+    elif dollar and dollar.change_percent is not None and dollar.change_percent <= -0.3:
+        lines.append("- 달러 약세는 원화와 신흥국 수급에 우호적으로 해석될 수 있습니다.")
+
+    if vix and vix.change_percent is not None and vix.change_percent <= -3:
+        lines.append("- VIX 하락은 위험선호 회복 신호라 한국 증시 전반의 투자심리에 보탬이 될 수 있습니다.")
+    elif vix and vix.change_percent is not None and vix.change_percent >= 3:
+        lines.append("- VIX 상승은 위험회피 신호라 한국장 초반 변동성을 키울 수 있습니다.")
+
+    if wti and wti.change_percent is not None and abs(wti.change_percent) >= 1:
+        direction = "상승" if wti.change_percent > 0 else "하락"
+        lines.append(f"- WTI 유가 {direction}은 에너지, 화학, 항공, 운송 업종의 상대 흐름에 영향을 줄 수 있습니다.")
+
+    if not lines and sp500 and sp500.change_percent is not None:
+        lines.append(f"- S&P 500 등락률이 {sp500.change_percent:+.2f}%로 제한적이라 한국장 영향은 중립에 가깝습니다.")
+    return lines[:5]
+
+
 def theme_count(items: list[NewsItem], words: set[str]) -> int:
     count = 0
     for item in items[:8]:
@@ -347,10 +466,10 @@ def theme_count(items: list[NewsItem], words: set[str]) -> int:
     return count
 
 
-def news_themes(items: list[NewsItem], moves: list[MarketMove]) -> list[str]:
+def news_themes(items: list[NewsItem], moves: list[MarketMove], semis: list[MarketMove], etfs: list[MarketMove]) -> list[str]:
     if os.getenv("OPENAI_API_KEY"):
         try:
-            return ask_openai_for_summary(moves, items)
+            return ask_openai_for_summary(moves, items, semis, etfs)
         except Exception as exc:
             print(f"warning: OpenAI summary failed, using fallback summary: {exc}", file=sys.stderr)
 
@@ -402,12 +521,14 @@ def build_report(timezone_name: str = DEFAULT_TIMEZONE) -> str:
     now_local = dt.datetime.now(timezone)
     now_utc = now_local.astimezone(dt.timezone.utc)
     markets = fetch_markets()
+    semis = fetch_named_moves(SEMI_SYMBOLS)
+    semi_etfs = fetch_named_moves(SEMI_ETFS)
+    watchlist = fetch_watchlist_moves()
     news = fetch_news(now_utc)
 
-    market_lines = [
-        f"- {move.name}: {format_price(move.price)} ({direction_label(move.change_percent)})"
-        for move in markets
-    ]
+    market_lines = format_move_lines(markets)
+    semi_lines = format_move_lines(semis)
+    semi_etf_lines = format_move_lines(semi_etfs)
 
     report = f"""
 🇺🇸 미국 증시 데일리 리포트
@@ -419,8 +540,20 @@ def build_report(timezone_name: str = DEFAULT_TIMEZONE) -> str:
 [요약]
 {market_tone(markets)}
 
+[반도체 주요 종목]
+{chr(10).join(semi_lines)}
+
+[반도체 ETF]
+{chr(10).join(semi_etf_lines)}
+
+[급등 종목 체크]
+{chr(10).join(surge_lines(watchlist))}
+
 [핵심 뉴스 흐름]
-{chr(10).join(news_themes(news, markets))}
+{chr(10).join(news_themes(news, markets, semis, semi_etfs))}
+
+[다음날 한국 증시 영향]
+{chr(10).join(korea_impact(markets, semis, semi_etfs, watchlist))}
 
 [주요 출처]
 {chr(10).join(source_lines(news))}

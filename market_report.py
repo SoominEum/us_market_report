@@ -28,6 +28,7 @@ DEFAULT_TIMEZONE = "Asia/Seoul"
 LOOKBACK_HOURS = int(os.getenv("NEWS_LOOKBACK_HOURS", "36"))
 USER_AGENT = "us-market-report/1.0 (+https://example.local)"
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+MAX_DATA_AGE_DAYS = int(os.getenv("MAX_DATA_AGE_DAYS", "5"))
 
 
 MARKET_SYMBOLS = {
@@ -138,6 +139,7 @@ class MarketMove:
     price: float | None
     change_percent: float | None
     sector: str | None = None
+    as_of: dt.date | None = None
 
 
 @dataclass(frozen=True)
@@ -260,11 +262,11 @@ def openai_headers() -> dict[str, str]:
 
 def ask_openai_for_summary(markets: list[MarketMove], news: list[NewsItem], semis: list[MarketMove], etfs: list[MarketMove]) -> list[str]:
     market_text = "\n".join(
-        f"{move.name}: {format_price(move.price)} ({direction_label(move.change_percent)})"
+        format_move_summary(move)
         for move in markets
     )
     semi_text = "\n".join(
-        f"{move.name}: {format_price(move.price)} ({direction_label(move.change_percent)})"
+        format_move_summary(move)
         for move in [*semis, *etfs]
     )
     news_text = "\n".join(
@@ -327,18 +329,29 @@ def fetch_market_move(symbol: str, name: str, sector: str | None = None) -> Mark
     try:
         payload = json.loads(http_get(url).decode("utf-8"))
         result = payload["chart"]["result"][0]
-        meta = result["meta"]
-        closes = [value for value in result["indicators"]["quote"][0]["close"] if value is not None]
-        price = meta.get("regularMarketPrice") or (closes[-1] if closes else None)
-        previous_close = meta.get("previousClose") or meta.get("chartPreviousClose")
-        if previous_close is None and len(closes) > 1:
-            previous_close = closes[-2]
-        if price is None:
-            price = closes[-1] if closes else None
+        timestamps = result.get("timestamp") or []
+        closes_with_dates = [
+            (
+                dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).date(),
+                float(close),
+            )
+            for timestamp, close in zip(timestamps, result["indicators"]["quote"][0]["close"])
+            if close is not None
+        ]
+        price = closes_with_dates[-1][1] if closes_with_dates else None
+        previous_close = closes_with_dates[-2][1] if len(closes_with_dates) > 1 else None
+        as_of = closes_with_dates[-1][0] if closes_with_dates else None
         change_percent = None
         if price is not None and previous_close:
             change_percent = ((float(price) - float(previous_close)) / float(previous_close)) * 100
-        return MarketMove(name=name, symbol=symbol, price=float(price) if price is not None else None, change_percent=change_percent, sector=sector)
+        return MarketMove(
+            name=name,
+            symbol=symbol,
+            price=float(price) if price is not None else None,
+            change_percent=change_percent,
+            sector=sector,
+            as_of=as_of,
+        )
     except Exception as exc:
         print(f"warning: failed to fetch market data for {symbol}: {exc}", file=sys.stderr)
         return MarketMove(name=name, symbol=symbol, price=None, change_percent=None, sector=sector)
@@ -372,6 +385,16 @@ def format_price(price: float | None) -> str:
     return f"{price:,.2f}"
 
 
+def format_as_of(as_of: dt.date | None) -> str:
+    if not as_of:
+        return "기준일 N/A"
+    return f"기준 {as_of:%m-%d}"
+
+
+def format_move_summary(move: MarketMove) -> str:
+    return f"{move.name}: {format_price(move.price)} ({direction_label(move.change_percent)}, {format_as_of(move.as_of)})"
+
+
 def market_tone(moves: Iterable[MarketMove]) -> str:
     core = [move.change_percent for move in moves if move.symbol in {"^GSPC", "^DJI", "^IXIC"} and move.change_percent is not None]
     if not core:
@@ -388,22 +411,30 @@ def market_tone(moves: Iterable[MarketMove]) -> str:
 
 def format_move_lines(moves: Iterable[MarketMove]) -> list[str]:
     return [
-        f"- {move.name} ({move.symbol}): {format_price(move.price)} ({direction_label(move.change_percent)})"
+        f"- {move.name} ({move.symbol}): {format_price(move.price)} ({direction_label(move.change_percent)}, {format_as_of(move.as_of)})"
         for move in moves
     ]
 
 
-def surge_lines(moves: list[MarketMove]) -> list[str]:
+def is_recent_move(move: MarketMove, now_local: dt.datetime) -> bool:
+    if not move.as_of:
+        return False
+    return (now_local.date() - move.as_of).days <= MAX_DATA_AGE_DAYS
+
+
+def surge_lines(moves: list[MarketMove], now_local: dt.datetime) -> list[str]:
     threshold = float(os.getenv("SURGE_THRESHOLD_PERCENT", "3.0"))
     surged = [
         move for move in moves
-        if move.change_percent is not None and move.change_percent >= threshold
+        if move.change_percent is not None
+        and move.change_percent >= threshold
+        and is_recent_move(move, now_local)
     ]
     surged.sort(key=lambda move: move.change_percent or 0, reverse=True)
     if not surged:
         return [f"- 관심 종목군에서 +{threshold:.1f}% 이상 급등한 종목은 확인되지 않았습니다."]
     return [
-        f"- {move.name} ({move.symbol}): {direction_label(move.change_percent)} / 관련 섹터: {move.sector or '분류 없음'}"
+        f"- {move.name} ({move.symbol}): {direction_label(move.change_percent)} ({format_as_of(move.as_of)}) / 관련 섹터: {move.sector or '분류 없음'}"
         for move in surged[:5]
     ]
 
@@ -547,7 +578,7 @@ def build_report(timezone_name: str = DEFAULT_TIMEZONE) -> str:
 {chr(10).join(semi_etf_lines)}
 
 [급등 종목 체크]
-{chr(10).join(surge_lines(watchlist))}
+{chr(10).join(surge_lines(watchlist, now_local))}
 
 [핵심 뉴스 흐름]
 {chr(10).join(news_themes(news, markets, semis, semi_etfs))}

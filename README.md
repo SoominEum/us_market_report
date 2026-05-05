@@ -26,13 +26,14 @@ TELEGRAM_CHAT_ID=...
 REPORT_TIMEZONE=Asia/Seoul
 NEWS_LOOKBACK_HOURS=36
 SURGE_THRESHOLD_PERCENT=3.0
+MAX_DATA_AGE_DAYS=5
 OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-4.1-mini
 ```
 
 `OPENAI_API_KEY`를 넣으면 핵심 뉴스 흐름을 OpenAI API로 한국어 요약합니다. 키가 없거나 API 호출이 실패하면 기본 키워드 기반 요약으로 자동 전환됩니다.
 
-리포트에는 주요 미국 지수, 반도체 대표 종목 3개, 반도체 ETF, 관심 종목군의 급등 종목, 다음날 한국 증시 영향 코멘트가 포함됩니다. `SURGE_THRESHOLD_PERCENT`는 급등 종목으로 표시할 최소 등락률입니다.
+리포트에는 주요 미국 지수, 반도체 대표 종목 3개, 반도체 ETF, 관심 종목군의 급등 종목, 다음날 한국 증시 영향 코멘트가 포함됩니다. `SURGE_THRESHOLD_PERCENT`는 급등 종목으로 표시할 최소 등락률이고, `MAX_DATA_AGE_DAYS`보다 오래된 가격 데이터는 급등 후보에서 제외합니다.
 
 ## 3. 실행
 

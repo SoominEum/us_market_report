@@ -23,4 +23,5 @@ jobs:
           REPORT_TIMEZONE: Asia/Seoul
           NEWS_LOOKBACK_HOURS: "36"
           SURGE_THRESHOLD_PERCENT: "3.0"
+          MAX_DATA_AGE_DAYS: "5"
         run: python market_report.py --send

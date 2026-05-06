@@ -2,8 +2,8 @@ name: Daily US Market Report
 
 on:
   schedule:
-    # 20:55 UTC is 05:55 KST. Avoid the top-of-hour GitHub Actions queue.
-    - cron: "55 20 * * *"
+    # 20:50 UTC is 05:50 KST. Avoid the top-of-hour GitHub Actions queue.
+    - cron: "50 20 * * *"
   workflow_dispatch:
 
 jobs:

@@ -53,7 +53,7 @@ python3 market_report.py --send
 
 ### GitHub Actions
 
-맥북을 닫아도 매일 오전 6시에 받으려면 GitHub Actions 사용을 권장합니다.
+맥북을 닫아도 매일 오전 5시 50분에 받으려면 GitHub Actions 사용을 권장합니다.
 
 1. GitHub에서 새 저장소를 만듭니다.
 2. 이 프로젝트를 저장소에 push합니다.
@@ -67,14 +67,14 @@ OPENAI_API_KEY
 
 `OPENAI_API_KEY`는 선택입니다. 등록하지 않아도 기본 요약으로 리포트가 전송됩니다.
 
-워크플로는 한국시간 매일 오전 5시 55분에 트리거되도록 설정되어 있습니다. GitHub Actions는 정각에 작업이 몰리면 지연될 수 있어서, 오전 6시 전후에 도착하도록 5분 앞당겨 둡니다.
+워크플로는 한국시간 매일 오전 5시 50분에 트리거되도록 설정되어 있습니다. GitHub Actions는 정각에 작업이 몰리면 지연될 수 있어서, 정각을 피한 시각으로 둡니다.
 
 ### 로컬 cron
 
-macOS/Linux cron 예시입니다. 한국시간 매일 오전 6시에 전송하려면 `crontab -e`에 추가합니다.
+macOS/Linux cron 예시입니다. 한국시간 매일 오전 5시 50분에 전송하려면 `crontab -e`에 추가합니다.
 
 ```cron
-0 6 * * * cd /Users/soom/Documents/workspace/us_market_report && /usr/bin/python3 market_report.py --send >> report.log 2>&1
+50 5 * * * cd /Users/soom/Documents/workspace/us_market_report && /usr/bin/python3 market_report.py --send >> report.log 2>&1
 ```
 
 미국장 마감 후 한국시간 아침에 보는 용도라면 오전 6~8시 실행이 무난합니다.

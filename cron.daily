@@ -1,4 +1,4 @@
 SHELL=/bin/zsh
 PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
 
-0 6 * * * cd /Users/soom/Documents/workspace/us_market_report && /usr/bin/python3 market_report.py --send >> report.log 2>&1
+50 5 * * * cd /Users/soom/Documents/workspace/us_market_report && /usr/bin/python3 market_report.py --send >> report.log 2>&1

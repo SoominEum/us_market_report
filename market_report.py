@@ -152,6 +152,13 @@ class NewsItem:
     score: int
 
 
+@dataclass(frozen=True)
+class FearGreedIndex:
+    score: float | None
+    rating: str | None
+    as_of: dt.datetime | None
+
+
 def load_dotenv(path: str = ".env") -> None:
     if not os.path.exists(path):
         return
@@ -166,8 +173,11 @@ def load_dotenv(path: str = ".env") -> None:
             os.environ.setdefault(key, value)
 
 
-def http_get(url: str, timeout: int = 20) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+def http_get(url: str, timeout: int = 20, headers: dict[str, str] | None = None) -> bytes:
+    request_headers = {"User-Agent": USER_AGENT}
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(url, headers=request_headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read()
 
@@ -258,6 +268,33 @@ def openai_headers() -> dict[str, str]:
         "Content-Type": "application/json",
         "User-Agent": USER_AGENT,
     }
+
+
+def fetch_fear_greed(now_utc: dt.datetime) -> FearGreedIndex:
+    date = now_utc.date().isoformat()
+    urls = [
+        f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{date}",
+        "https://production.dataviz.cnn.io/index/fearandgreed/graphdata",
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": "https://www.cnn.com/markets/fear-and-greed",
+    }
+    for url in urls:
+        try:
+            payload = json.loads(http_get(url, headers=headers).decode("utf-8"))
+            data = payload.get("fear_and_greed", payload)
+            timestamp = data.get("timestamp")
+            as_of = dt.datetime.fromisoformat(timestamp) if timestamp else None
+            return FearGreedIndex(
+                score=float(data["score"]) if data.get("score") is not None else None,
+                rating=str(data["rating"]) if data.get("rating") else None,
+                as_of=as_of,
+            )
+        except Exception as exc:
+            print(f"warning: failed to fetch Fear & Greed data from {url}: {exc}", file=sys.stderr)
+    return FearGreedIndex(score=None, rating=None, as_of=None)
 
 
 def ask_openai_for_summary(markets: list[MarketMove], news: list[NewsItem], semis: list[MarketMove], etfs: list[MarketMove]) -> list[str]:
@@ -357,6 +394,24 @@ def fetch_market_move(symbol: str, name: str, sector: str | None = None) -> Mark
         return MarketMove(name=name, symbol=symbol, price=None, change_percent=None, sector=sector)
 
 
+def fetch_chart_closes(symbol: str, range_: str = "1y") -> list[tuple[dt.date, float]]:
+    encoded = urllib.parse.quote(symbol, safe="")
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?range={range_}&interval=1d"
+    try:
+        payload = json.loads(http_get(url).decode("utf-8"))
+        result = payload["chart"]["result"][0]
+        timestamps = result.get("timestamp") or []
+        closes = result["indicators"]["quote"][0]["close"]
+        return [
+            (dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).date(), float(close))
+            for timestamp, close in zip(timestamps, closes)
+            if close is not None
+        ]
+    except Exception as exc:
+        print(f"warning: failed to fetch historical closes for {symbol}: {exc}", file=sys.stderr)
+        return []
+
+
 def fetch_markets() -> list[MarketMove]:
     return [fetch_market_move(symbol, name) for symbol, name in MARKET_SYMBOLS.items()]
 
@@ -389,6 +444,140 @@ def format_as_of(as_of: dt.date | None) -> str:
     if not as_of:
         return "기준일 N/A"
     return f"기준 {as_of:%m-%d}"
+
+
+def label_fear_greed(index: FearGreedIndex) -> str:
+    if index.score is None:
+        return "N/A (데이터 수집 실패)"
+    score = index.score
+    if score < 25:
+        return "🥶 EXTREME FEAR → 공포가 과도해 변동성 확대 가능"
+    if score < 45:
+        return "😨 FEAR → 투자자들이 걱정 중, 변동성 증가 가능"
+    if score < 55:
+        return "⚖️ NEUTRAL → 투자심리가 중립권"
+    if score < 75:
+        return "🤑 GREED → 위험자산 선호가 우세"
+    return "🔥 EXTREME GREED → 과열 경계 필요"
+
+
+def label_vix(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    if value < 15:
+        return "🟢 낮은 변동성 → 시장이 비교적 안정적"
+    if value < 25:
+        return "🟡 보통 변동성 → 정상적인 시장 움직임"
+    return "🔴 높은 변동성 → 시장 불안과 급변 가능성"
+
+
+def label_ten_year_yield(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    if value < 3:
+        return "🟢 낮은 금리 → 성장주와 위험자산에 우호적"
+    if value <= 4.5:
+        return "🟡 보통 금리 → 시장 안정적, 큰 변화 가능성 적음"
+    return "🔴 높은 금리 → 밸류에이션 부담과 변동성 요인"
+
+
+def label_sp200(price: float | None, ma200: float | None) -> str:
+    if price is None or ma200 is None:
+        return "N/A"
+    if price >= ma200:
+        return "🟢 주가가 200일 평균보다 높음 → 상승 추세"
+    return "🔴 주가가 200일 평균보다 낮음 → 하락/약세 추세"
+
+
+def news_sentiment(news: list[NewsItem]) -> tuple[str, int]:
+    positive_words = {
+        "rally", "rebound", "gain", "gains", "higher", "beat", "strong", "growth",
+        "optimism", "surge", "record", "boom", "upbeat", "cooling inflation",
+    }
+    negative_words = {
+        "selloff", "fall", "falls", "lower", "drop", "drops", "weak", "miss",
+        "inflation fears", "recession", "war", "tariff", "risk", "cuts", "slump",
+        "down", "loss", "losses",
+    }
+    score = 0
+    for item in news[:8]:
+        text = f"{item.title} {item.summary}".lower()
+        if any(word in text for word in positive_words):
+            score += 1
+        if any(word in text for word in negative_words):
+            score -= 1
+    if score >= 2:
+        return "🟢 긍정적 (Positive)", score
+    if score <= -2:
+        return "🔴 부정적 (Negative)", score
+    return "⚖️ 중립적 (Neutral)", score
+
+
+def recommendation_label(
+    fear_greed: FearGreedIndex,
+    vix: MarketMove,
+    ten_year_yield: MarketMove,
+    sp500_price: float | None,
+    sp500_ma200: float | None,
+    news_score: int,
+) -> str:
+    score = 0
+    if fear_greed.score is not None:
+        if 35 <= fear_greed.score < 75:
+            score += 1
+        elif fear_greed.score >= 80:
+            score -= 1
+    if vix.price is not None:
+        score += 1 if vix.price < 22 else -1
+    yield_value = normalize_ten_year_yield(ten_year_yield.price)
+    if yield_value is not None:
+        score += 1 if yield_value <= 4.5 else -1
+    if sp500_price is not None and sp500_ma200 is not None:
+        score += 1 if sp500_price >= sp500_ma200 else -1
+    if news_score >= 2:
+        score += 1
+    elif news_score <= -2:
+        score -= 1
+
+    if score >= 3:
+        return "🟡 매수 (BUY)"
+    if score >= 1:
+        return "⚖️ 관망 (HOLD)"
+    return "🔴 방어 (REDUCE)"
+
+
+def normalize_ten_year_yield(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return value / 10 if value > 10 else value
+
+
+def build_signal_dashboard(markets: list[MarketMove], news: list[NewsItem], now_utc: dt.datetime) -> str:
+    fear_greed = fetch_fear_greed(now_utc)
+    by_symbol = {move.symbol: move for move in markets}
+    vix = by_symbol.get("^VIX") or fetch_market_move("^VIX", "VIX")
+    ten_year_yield = fetch_market_move("^TNX", "US 10Y Treasury Yield")
+    ten_year_value = normalize_ten_year_yield(ten_year_yield.price)
+    sp500_history = fetch_chart_closes("^GSPC", "1y")
+    sp500_price = sp500_history[-1][1] if sp500_history else by_symbol.get("^GSPC", MarketMove("S&P 500", "^GSPC", None, None)).price
+    sp500_ma200 = sum(close for _, close in sp500_history[-200:]) / 200 if len(sp500_history) >= 200 else None
+    sentiment_label, sentiment_score = news_sentiment(news)
+    recommendation = recommendation_label(fear_greed, vix, ten_year_yield, sp500_price, sp500_ma200, sentiment_score)
+
+    fear_value = f"{fear_greed.score:.0f}" if fear_greed.score is not None else "N/A"
+    vix_value = f"{vix.price:.2f}" if vix.price is not None else "N/A"
+    yield_value = f"{ten_year_value:.2f}%" if ten_year_value is not None else "N/A"
+    ma_value = f"{sp500_ma200:.2f}" if sp500_ma200 is not None else "N/A"
+
+    return f"""
+📉 Fear & Greed Index: {fear_value} ({label_fear_greed(fear_greed)})
+📊 변동성 지수 (VIX): {vix_value} ({label_vix(vix.price)})
+💰 미국 10년물 국채 금리: {yield_value} ({label_ten_year_yield(ten_year_value)})
+📈 S&P 500 200일 이동평균선: {ma_value} ({label_sp200(sp500_price, sp500_ma200)})
+━━━━━━━━━━━━━━━━━━━
+📢 매매 추천: {recommendation}
+📰 뉴스 분석 결과: {sentiment_label}
+""".strip()
 
 
 def format_move_summary(move: MarketMove) -> str:
@@ -556,12 +745,15 @@ def build_report(timezone_name: str = DEFAULT_TIMEZONE) -> str:
     semi_etfs = fetch_named_moves(SEMI_ETFS)
     watchlist = fetch_watchlist_moves()
     news = fetch_news(now_utc)
+    dashboard = build_signal_dashboard(markets, news, now_utc)
 
     market_lines = format_move_lines(markets)
     semi_lines = format_move_lines(semis)
     semi_etf_lines = format_move_lines(semi_etfs)
 
     report = f"""
+{dashboard}
+
 🇺🇸 미국 증시 데일리 리포트
 기준 시각: {now_local:%Y-%m-%d %H:%M} {timezone_name}
 
